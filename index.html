@@ -1,0 +1,143 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Documents</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <section id="authScreen" class="auth-wrap">
+    <form id="authForm" class="auth-card">
+      <h1>📁 My Documents</h1>
+      <p>Keep your files, always.</p>
+
+      <div class="tabs">
+        <button type="button" id="loginTab" class="active">Sign in</button>
+        <button type="button" id="registerTab">Create account</button>
+      </div>
+
+      <label for="email">Email</label>
+      <input id="email" type="email" required autocomplete="email"
+             placeholder="you@example.com">
+
+      <label for="password">Password</label>
+      <div class="password-row">
+        <input id="password" type="password" required
+               autocomplete="current-password" minlength="6"
+               placeholder="Enter password">
+        <button type="button" data-toggle-password="password">Show</button>
+      </div>
+
+      <div id="confirmPasswordGroup" hidden>
+        <label for="confirmPassword">Confirm password</label>
+        <input id="confirmPassword" type="password"
+               autocomplete="new-password" minlength="6"
+               placeholder="Re-enter password">
+      </div>
+
+      <button id="authSubmit" class="primary" type="submit">Sign in</button>
+      <button id="resetBtn" class="link-button" type="button">
+        Forgot password?
+      </button>
+      <p id="authMessage" role="status"></p>
+    </form>
+  </section>
+
+  <div id="appScreen" hidden>
+    <aside class="sidebar">
+      <h2>📁 My Documents</h2>
+      <p>Keep your files, always.</p>
+
+      <div class="profile">
+        <img id="avatar" alt="Profile photo" hidden>
+        <span id="avatarFallback">👤</span>
+        <div>
+          <strong id="profileName">My profile</strong>
+          <small id="userEmail"></small>
+        </div>
+      </div>
+
+      <label class="small-label" for="displayName">Profile name</label>
+      <input id="displayName" placeholder="Your name">
+      <label class="small-label" for="avatarInput">Profile photo</label>
+      <input id="avatarInput" type="file" accept="image/*">
+      <button id="saveProfileBtn" type="button">Save profile</button>
+
+      <nav>
+        <button data-view="home">Home <span id="count-home">0</span></button>
+        <button data-view="all">All documents <span id="count-all">0</span></button>
+        <button data-view="pdfs">PDF <span id="count-pdfs">0</span></button>
+        <button data-view="images">Images <span id="count-images">0</span></button>
+        <button data-view="documents">Word <span id="count-documents">0</span></button>
+        <button data-view="spreadsheets">Excel <span id="count-spreadsheets">0</span></button>
+        <button data-view="other">Others <span id="count-other">0</span></button>
+        <button data-view="trash">Trash <span id="count-trash">0</span></button>
+      </nav>
+
+      <button id="themeBtn" type="button">🌙 Dark mode</button>
+      <button id="logoutBtn" type="button">Sign out</button>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">Home</h1>
+          <p>Manage your documents securely.</p>
+        </div>
+        <input id="searchInput" type="search" placeholder="Search files...">
+      </header>
+
+      <section id="homeDashboard" class="stats">
+        <article><span>All documents</span><strong id="center-count-all">0</strong></article>
+        <article><span>PDF files</span><strong id="center-count-pdfs">0</strong></article>
+        <article><span>Images</span><strong id="center-count-images">0</strong></article>
+        <article><span>In trash</span><strong id="center-count-trash">0</strong></article>
+      </section>
+
+      <section class="upload-card">
+        <h2>Upload documents</h2>
+        <p>Choose a file to store it in your private cloud bucket.</p>
+        <label class="file-picker" for="fileInput">Choose files</label>
+        <input id="fileInput" type="file" multiple>
+        <div id="dropZone" class="drop-zone">
+          <p>Or drag and drop files here</p>
+          <input id="dropFileInput" type="file" multiple>
+        </div>
+        <progress id="progressBar" max="100" value="0" hidden></progress>
+        <p id="message" role="status"></p>
+      </section>
+
+      <section class="list-card">
+        <div class="list-heading">
+          <h2 id="listTitle">Recent documents</h2>
+          <button id="refreshBtn" type="button">Refresh</button>
+        </div>
+        <div id="emptyState">No documents to show.</div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th><th>Category</th><th>Size</th>
+                <th>Uploaded</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="documentList"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="previewDialog">
+    <div class="preview-heading">
+      <strong id="previewTitle">Preview</strong>
+      <button id="closePreviewBtn" type="button">Close</button>
+    </div>
+    <div id="previewContent"></div>
+  </dialog>
+
+  <script type="module" src="script.js"></script>
+</body>
+</html>

@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -59,11 +58,7 @@
         </div>
       </div>
 
-      <label class="small-label" for="displayName">Profile name</label>
-<input id="displayName" placeholder="Your name">
-<label class="small-label" for="avatarInput" hidden>Profile photo</label>
-<input id="avatarInput" type="file" accept="image/*" hidden>
-<button id="saveProfileBtn" type="button">Save profile</button>
+      <button id="editProfileBtn" type="button">✏️ Edit profile</button>
 
       <nav>
         <button data-view="home">Home <span id="count-home">0</span></button>
@@ -136,6 +131,42 @@
       <button id="closePreviewBtn" type="button">Close</button>
     </div>
     <div id="previewContent"></div>
+  </dialog>
+
+  <dialog id="profileDialog">
+    <div class="preview-heading">
+      <strong>Edit profile</strong>
+      <button id="closeProfileBtn" type="button">Close</button>
+    </div>
+
+    <label for="displayName">Profile name</label>
+    <input id="displayName" placeholder="Your name" maxlength="60">
+
+    <label for="avatarInput">Profile photo</label>
+    <input id="avatarInput" type="file" accept="image/*">
+
+    <button id="saveProfileBtn" type="button">Save profile</button>
+    <p id="profileMessage" role="status"></p>
+
+    <hr class="dialog-divider">
+
+    <form id="passwordForm">
+      <h3>Change password</h3>
+
+      <label for="newPassword">New password</label>
+      <div class="password-row">
+        <input id="newPassword" type="password" minlength="6" required
+               autocomplete="new-password" placeholder="At least 6 characters">
+        <button type="button" data-toggle-password="newPassword">Show</button>
+      </div>
+
+      <label for="confirmNewPassword">Confirm new password</label>
+      <input id="confirmNewPassword" type="password" minlength="6" required
+             autocomplete="new-password" placeholder="Re-enter new password">
+
+      <button id="changePasswordBtn" class="primary" type="submit">Update password</button>
+      <p id="passwordMessage" role="status"></p>
+    </form>
   </dialog>
 
   <script type="module" src="script.js"></script>

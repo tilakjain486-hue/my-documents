@@ -1,4 +1,3 @@
-
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 
 // Your existing Supabase project
@@ -17,6 +16,7 @@ let searchTerm = "";
 let authMode = "login";
 let busy = false;
 let loadedUserId = null;
+let openProfileAfterLogin = false;
 
 const categories = ["pdfs", "images", "documents", "spreadsheets", "other"];
 
@@ -28,6 +28,18 @@ function showMessage(text, error = false) {
 function showAuthMessage(text, error = false) {
   $("authMessage").textContent = text;
   $("authMessage").style.color = error ? "#dc2626" : "#15803d";
+}
+
+function showProfileMessage(text, error = false) {
+  $("profileMessage").textContent = text;
+  $("profileMessage").style.color = error ? "#dc2626" : "#15803d";
+}
+
+function openProfileDialog(passwordNote = "") {
+  showProfileMessage("");
+  $("passwordMessage").textContent = passwordNote;
+  $("passwordMessage").style.color = "#15803d";
+  $("profileDialog").showModal();
 }
 
 function setBusy(value) {
@@ -503,9 +515,9 @@ async function saveProfile() {
     $("profileName").textContent = displayName || "My profile";
     $("avatarInput").value = "";
     await loadProfile();
-    showMessage("Profile saved.");
+    showProfileMessage("Profile saved.");
   } catch (error) {
-    showMessage(`Could not save profile: ${error.message}`, true);
+    showProfileMessage(`Could not save profile: ${error.message}`, true);
   }
 }
 
@@ -513,6 +525,11 @@ async function enterApplication(user) {
   currentUser = user;
   setSignedInView(true);
   await Promise.all([loadDocuments(), loadProfile()]);
+
+  if (openProfileAfterLogin) {
+    openProfileAfterLogin = false;
+    openProfileDialog("Enter a new password below to finish resetting it.");
+  }
 }
 
 async function leaveApplication() {
@@ -590,6 +607,14 @@ $("logoutBtn").addEventListener("click", async () => {
 });
 
 db.auth.onAuthStateChange((event, session) => {
+  if (event === "PASSWORD_RECOVERY") {
+    if (loadedUserId && loadedUserId === session?.user?.id) {
+      setTimeout(() => openProfileDialog("Enter a new password below to finish resetting it."), 0);
+    } else {
+      openProfileAfterLogin = true;
+    }
+  }
+
   // Keep auth callbacks quick; avoid Supabase calls inside this callback.
   if (event === "SIGNED_OUT" || !session?.user) {
     loadedUserId = null;
@@ -639,6 +664,45 @@ document.querySelectorAll("[data-view]").forEach((button) => {
 
 $("refreshBtn").addEventListener("click", loadDocuments);
 $("saveProfileBtn").addEventListener("click", saveProfile);
+
+// Edit profile dialog
+$("editProfileBtn").addEventListener("click", () => openProfileDialog());
+$("closeProfileBtn").addEventListener("click", () => $("profileDialog").close());
+
+$("passwordForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  const setMsg = (text, error = false) => {
+    $("passwordMessage").textContent = text;
+    $("passwordMessage").style.color = error ? "#dc2626" : "#15803d";
+  };
+
+  const newPassword = $("newPassword").value;
+
+  if (newPassword.length < 6) {
+    setMsg("Password must be at least 6 characters.", true);
+    return;
+  }
+  if (newPassword !== $("confirmNewPassword").value) {
+    setMsg("Passwords do not match.", true);
+    return;
+  }
+
+  $("changePasswordBtn").disabled = true;
+  try {
+    const { error } = await db.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+
+    $("passwordForm").reset();
+    $("newPassword").type = "password";
+    document.querySelector('[data-toggle-password="newPassword"]').textContent = "Show";
+    setMsg("Password updated successfully.");
+  } catch (error) {
+    setMsg(error.message || "Could not update password.", true);
+  } finally {
+    $("changePasswordBtn").disabled = false;
+  }
+});
 
 document.querySelectorAll("[data-toggle-password]").forEach((button) => {
   button.addEventListener("click", () => {

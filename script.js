@@ -1,3 +1,4 @@
+
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 
 // Your existing Supabase project
@@ -204,6 +205,17 @@ function renderDocuments() {
     } else {
       addAction(actions, "Preview", () => previewFile(file));
       addAction(actions, "Download", () => downloadFile(file));
+
+      const fileExt = (file.name.split(".").pop() || "").toLowerCase();
+      if (file.category === "images") {
+        addAction(actions, "To PDF", () => convertFile(file, "image-pdf"));
+      } else if (fileExt === "pdf") {
+        addAction(actions, "To Word", () => convertFile(file, "pdf-word"));
+      } else if (fileExt === "docx") {
+        addAction(actions, "To PDF", () => convertFile(file, "word-pdf"));
+      }
+
+      addAction(actions, "Rename", () => renameFile(file));
       addAction(actions, "Trash", () => moveToTrash(file));
     }
 
@@ -373,6 +385,320 @@ async function uploadFiles(fileList) {
   }
 }
 
+// ===== File conversion (runs in your browser) =====
+const LIBS = {
+  pdfLib: "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js",
+  mammoth: "https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js",
+  pdfjs: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js",
+  pdfjsWorker: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js",
+  docx: "https://cdn.jsdelivr.net/npm/docx@7.8.2/build/index.js"
+};
+
+const loadedScripts = new Map();
+
+function loadScript(url) {
+  if (!loadedScripts.has(url)) {
+    loadedScripts.set(url, new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = url;
+      script.onload = resolve;
+      script.onerror = () => {
+        loadedScripts.delete(url);
+        reject(new Error("Could not load the converter. Check your internet connection."));
+      };
+      document.head.append(script);
+    }));
+  }
+  return loadedScripts.get(url);
+}
+
+async function imageViaCanvas(buffer, type) {
+  const bitmap = await createImageBitmap(new Blob([buffer], { type }));
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext("2d").drawImage(bitmap, 0, 0);
+
+  const asJpeg = type === "image/jpeg";
+  const blob = await new Promise((resolve) =>
+    canvas.toBlob(resolve, asJpeg ? "image/jpeg" : "image/png", 0.92)
+  );
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), jpeg: asJpeg };
+}
+
+async function imageToPdf(buffer, file) {
+  await loadScript(LIBS.pdfLib);
+  const { PDFDocument } = window.PDFLib;
+
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  const type = (file.type || "").toLowerCase();
+  const isJpeg = type === "image/jpeg" || ext === "jpg" || ext === "jpeg";
+  const isPng = type === "image/png" || ext === "png";
+
+  const pdf = await PDFDocument.create();
+  let image;
+
+  try {
+    // The canvas path also applies phone-photo rotation and handles WebP, GIF, BMP.
+    const converted = await imageViaCanvas(buffer, isJpeg ? "image/jpeg" : (type || "image/png"));
+    image = converted.jpeg ? await pdf.embedJpg(converted.bytes) : await pdf.embedPng(converted.bytes);
+  } catch {
+    if (isJpeg) image = await pdf.embedJpg(buffer);
+    else if (isPng) image = await pdf.embedPng(buffer);
+    else throw new Error("This image format cannot be converted. Please use JPG or PNG.");
+  }
+
+  const a4 = [595.28, 841.89];
+  const landscape = image.width > image.height;
+  const [pageWidth, pageHeight] = landscape ? [a4[1], a4[0]] : a4;
+  const margin = 24;
+  const scale = Math.min(
+    (pageWidth - margin * 2) / image.width,
+    (pageHeight - margin * 2) / image.height,
+    1
+  );
+  const width = image.width * scale;
+  const height = image.height * scale;
+
+  const page = pdf.addPage([pageWidth, pageHeight]);
+  page.drawImage(image, {
+    x: (pageWidth - width) / 2,
+    y: (pageHeight - height) / 2,
+    width,
+    height
+  });
+
+  return { blob: new Blob([await pdf.save()], { type: "application/pdf" }), note: "" };
+}
+
+function cleanForPdf(text, stats) {
+  const mapped = text
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return mapped.replace(/[^\x20-\x7E\xA0-\xFF\u2022]/g, () => {
+    stats.replaced++;
+    return "?";
+  });
+}
+
+function wrapText(text, font, size, maxWidth) {
+  const lines = [];
+  let line = "";
+
+  for (const word of text.split(" ")) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+      line = candidate;
+      continue;
+    }
+
+    if (line) {
+      lines.push(line);
+      line = "";
+    }
+
+    // A single very long word: split it by characters.
+    let chunk = "";
+    for (const ch of word) {
+      if (chunk && font.widthOfTextAtSize(chunk + ch, size) > maxWidth) {
+        lines.push(chunk);
+        chunk = ch;
+      } else {
+        chunk += ch;
+      }
+    }
+    line = chunk;
+  }
+
+  if (line) lines.push(line);
+  return lines;
+}
+
+async function wordToPdf(buffer) {
+  await Promise.all([loadScript(LIBS.pdfLib), loadScript(LIBS.mammoth)]);
+  const { PDFDocument, StandardFonts } = window.PDFLib;
+
+  const { value: html } = await window.mammoth.convertToHtml({ arrayBuffer: buffer });
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+
+  const stats = { replaced: 0 };
+  const blocks = [];
+  const add = (text, style) => {
+    const cleaned = cleanForPdf(text, stats);
+    if (cleaned) blocks.push({ text: cleaned, style });
+  };
+
+  for (const element of parsed.body.children) {
+    const tag = element.tagName.toLowerCase();
+
+    if (/^h[1-6]$/.test(tag)) {
+      add(element.textContent, tag);
+    } else if (tag === "ul" || tag === "ol") {
+      [...element.querySelectorAll("li")].forEach((li, index) => {
+        add(`${tag === "ol" ? `${index + 1}.` : "\u2022"} ${li.textContent}`, "li");
+      });
+    } else if (tag === "table") {
+      for (const row of element.querySelectorAll("tr")) {
+        add([...row.children].map((cell) => cell.textContent.trim()).join("  |  "), "p");
+      }
+    } else {
+      add(element.textContent, "p");
+    }
+  }
+
+  if (!blocks.length) throw new Error("No text was found in this Word file.");
+
+  const styles = {
+    h1: { size: 20, bold: true },
+    h2: { size: 16, bold: true },
+    h3: { size: 14, bold: true },
+    h4: { size: 12, bold: true },
+    h5: { size: 12, bold: true },
+    h6: { size: 12, bold: true },
+    p: { size: 11 },
+    li: { size: 11, indent: 14 }
+  };
+
+  const pdf = await PDFDocument.create();
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+
+  const pageWidth = 595.28;
+  const pageHeight = 841.89;
+  const margin = 54;
+  let page = pdf.addPage([pageWidth, pageHeight]);
+  let y = pageHeight - margin;
+
+  for (const block of blocks) {
+    const style = styles[block.style] || styles.p;
+    const font = style.bold ? bold : regular;
+    const indent = style.indent || 0;
+    const lineHeight = style.size * 1.4;
+    const lines = wrapText(block.text, font, style.size, pageWidth - margin * 2 - indent);
+
+    if (style.bold) y -= 6;
+
+    for (const line of lines) {
+      if (y - lineHeight < margin) {
+        page = pdf.addPage([pageWidth, pageHeight]);
+        y = pageHeight - margin;
+      }
+      y -= lineHeight;
+      page.drawText(line, { x: margin + indent, y, size: style.size, font });
+    }
+    y -= 6;
+  }
+
+  return {
+    blob: new Blob([await pdf.save()], { type: "application/pdf" }),
+    note: stats.replaced
+      ? "Some characters (for example non-English scripts) could not be converted."
+      : ""
+  };
+}
+
+async function pdfToWord(buffer) {
+  await Promise.all([loadScript(LIBS.pdfjs), loadScript(LIBS.docx)]);
+
+  const pdfjsLib = window.pdfjsLib;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = LIBS.pdfjsWorker;
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+
+  const { Document, Packer, Paragraph, TextRun } = window.docx;
+  const paragraphs = [];
+  let totalChars = 0;
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+
+    const lines = [];
+    let current = "";
+    let lastY = null;
+
+    for (const item of content.items) {
+      if (typeof item.str !== "string") continue;
+      const y = item.transform[5];
+
+      if (lastY !== null && Math.abs(y - lastY) > 2) {
+        lines.push(current);
+        current = "";
+      }
+
+      current += item.str;
+      lastY = y;
+
+      if (item.hasEOL) {
+        lines.push(current);
+        current = "";
+        lastY = null;
+      }
+    }
+    if (current) lines.push(current);
+
+    const textLines = lines.map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+    totalChars += textLines.join("").length;
+
+    textLines.forEach((text, index) => {
+      paragraphs.push(new Paragraph({
+        children: [new TextRun(text)],
+        pageBreakBefore: pageNumber > 1 && index === 0,
+        spacing: { after: 80 }
+      }));
+    });
+  }
+
+  if (!totalChars) {
+    throw new Error("No selectable text found. This looks like a scanned PDF, which needs OCR (not supported).");
+  }
+
+  const doc = new Document({ sections: [{ children: paragraphs }] });
+  return { blob: await Packer.toBlob(doc), note: "" };
+}
+// ===== End file conversion =====
+
+async function convertFile(file, kind) {
+  if (busy) return;
+
+  showMessage(`Converting ${file.name}... please wait.`);
+
+  try {
+    const url = await getSignedUrl(file.storage_path);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("Could not read the file from storage.");
+    const buffer = await response.arrayBuffer();
+
+    const baseName = file.name.replace(/\.[^.]+$/, "") || "converted";
+    let result;
+    let newName;
+    let mime;
+
+    if (kind === "image-pdf") {
+      result = await imageToPdf(buffer, file);
+      newName = `${baseName}.pdf`;
+      mime = "application/pdf";
+    } else if (kind === "word-pdf") {
+      result = await wordToPdf(buffer);
+      newName = `${baseName}.pdf`;
+      mime = "application/pdf";
+    } else {
+      result = await pdfToWord(buffer);
+      newName = `${baseName}.docx`;
+      mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    }
+
+    await uploadFiles([new File([result.blob], newName, { type: mime })]);
+    showMessage(`Converted and saved as ${newName}. ${result.note}`.trim(), Boolean(result.note));
+  } catch (error) {
+    showMessage(`Conversion failed: ${error.message}`, true);
+  }
+}
+
 async function updateDeleted(file, deleted) {
   const { error } = await db.from("documents")
     .update({ deleted })
@@ -380,6 +706,44 @@ async function updateDeleted(file, deleted) {
     .eq("user_id", currentUser.id);
 
   if (error) throw error;
+  await loadDocuments();
+}
+
+async function renameFile(file) {
+  const input = prompt("Enter a new name for this file:", file.name);
+  if (input === null) return;
+
+  let newName = input.trim().replace(/[\\/]/g, "_");
+
+  if (!newName) {
+    showMessage("File name cannot be empty.", true);
+    return;
+  }
+
+  // Keep the original extension if the new name has none.
+  const oldExt = file.name.includes(".") ? file.name.split(".").pop() : "";
+  if (oldExt && !newName.includes(".")) newName += `.${oldExt}`;
+
+  if (newName.length > 150) {
+    showMessage("File name is too long (maximum 150 characters).", true);
+    return;
+  }
+  if (newName === file.name) return;
+
+  const { error } = await db.from("documents")
+    .update({
+      name: newName,
+      category: categoryFor({ name: newName, type: file.type || "" })
+    })
+    .eq("id", file.id)
+    .eq("user_id", currentUser.id);
+
+  if (error) {
+    showMessage(`Could not rename file: ${error.message}`, true);
+    return;
+  }
+
+  showMessage(`Renamed to ${newName}`);
   await loadDocuments();
 }
 

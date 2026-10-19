@@ -840,3 +840,449 @@ async function updateDeleted(file, deleted) {
     .update({ deleted })
     .eq("id", file.id)
     .eq("user_id", currentUser.id);
+
+  if (error) throw error;
+  await loadDocuments();
+}
+
+async function renameFile(file) {
+  const input = prompt("Enter a new name for this file:", file.name);
+  if (input === null) return;
+
+  let newName = input.trim().replace(/[\\/]/g, "_");
+
+  if (!newName) {
+    showMessage("File name cannot be empty.", true);
+    return;
+  }
+
+  // Keep the original extension if the new name has none.
+  const oldExt = file.name.includes(".") ? file.name.split(".").pop() : "";
+  if (oldExt && !newName.includes(".")) newName += `.${oldExt}`;
+
+  if (newName.length > 150) {
+    showMessage("File name is too long (maximum 150 characters).", true);
+    return;
+  }
+  if (newName === file.name) return;
+
+  const { error } = await db.from("documents")
+    .update({
+      name: newName,
+      category: categoryFor({ name: newName, type: file.type || "" })
+    })
+    .eq("id", file.id)
+    .eq("user_id", currentUser.id);
+
+  if (error) {
+    showMessage(`Could not rename file: ${error.message}`, true);
+    return;
+  }
+
+  showMessage(`Renamed to ${newName}`);
+  await loadDocuments();
+}
+
+async function moveToTrash(file) {
+  if (!confirm(`Move "${file.name}" to trash?`)) return;
+
+  try {
+    await updateDeleted(file, true);
+    showMessage("File moved to trash.");
+  } catch (error) {
+    showMessage(`Could not move file to trash: ${error.message}`, true);
+  }
+}
+
+async function restoreFile(file) {
+  try {
+    await updateDeleted(file, false);
+    showMessage("File restored.");
+  } catch (error) {
+    showMessage(`Could not restore file: ${error.message}`, true);
+  }
+}
+
+async function permanentlyDelete(file) {
+  if (!confirm(`Permanently delete "${file.name}"? This cannot be undone.`)) return;
+
+  try {
+    const { error: storageError } = await db.storage
+      .from(BUCKET)
+      .remove([file.storage_path]);
+
+    if (storageError) throw storageError;
+
+    const { error: recordError } = await db.from("documents")
+      .delete()
+      .eq("id", file.id)
+      .eq("user_id", currentUser.id);
+
+    if (recordError) throw recordError;
+
+    showMessage("File permanently deleted.");
+    await loadDocuments();
+  } catch (error) {
+    showMessage(`Could not permanently delete file: ${error.message}`, true);
+  }
+}
+
+async function loadProfile() {
+  if (!currentUser) return;
+
+  $("userEmail").textContent = currentUser.email || "";
+
+  const { data, error } = await db.from("profiles")
+    .select("display_name, avatar_path")
+    .eq("id", currentUser.id)
+    .maybeSingle();
+
+  if (error) {
+    showMessage(`Could not load profile: ${error.message}`, true);
+    return;
+  }
+
+  $("displayName").value = data?.display_name || "";
+  $("profileName").textContent = data?.display_name || "My profile";
+  $("removePhotoBtn").hidden = !data?.avatar_path;
+
+  if (data?.avatar_path) {
+    try {
+      const url = await getSignedUrl(data.avatar_path);
+      $("avatar").src = url;
+      $("avatar").hidden = false;
+      $("avatarFallback").hidden = true;
+    } catch {
+      $("avatar").hidden = true;
+      $("avatarFallback").hidden = false;
+    }
+  } else {
+    $("avatar").hidden = true;
+    $("avatarFallback").hidden = false;
+  }
+}
+
+async function saveProfile() {
+  if (!currentUser) return;
+
+  const displayName = $("displayName").value.trim();
+  const photo = $("avatarInput").files[0];
+  let avatarPath = null;
+
+  try {
+    const { data: oldProfile, error: readError } = await db.from("profiles")
+      .select("avatar_path")
+      .eq("id", currentUser.id)
+      .maybeSingle();
+
+    if (readError) throw readError;
+
+    avatarPath = oldProfile?.avatar_path || null;
+
+    if (photo) {
+      if (!photo.type.startsWith("image/")) {
+        throw new Error("Please choose an image file.");
+      }
+      if (photo.size > 5 * 1024 * 1024) {
+        throw new Error("Profile photo must be 5 MB or smaller.");
+      }
+
+      const ext = photo.name.includes(".") ? photo.name.split(".").pop() : "jpg";
+      const path = `${currentUser.id}/profile/avatar-${crypto.randomUUID()}.${ext}`;
+
+      const { error: uploadError } = await db.storage.from(BUCKET).upload(path, photo, {
+        upsert: false,
+        contentType: photo.type
+      });
+
+      if (uploadError) throw uploadError;
+      avatarPath = path;
+    }
+
+    const { error: saveError } = await db.from("profiles").upsert({
+      id: currentUser.id,
+      display_name: displayName,
+      avatar_path: avatarPath,
+      updated_at: new Date().toISOString()
+    });
+
+    if (saveError) {
+      if (photo && avatarPath) {
+        await db.storage.from(BUCKET).remove([avatarPath]);
+      }
+      throw saveError;
+    }
+
+    if (photo && oldProfile?.avatar_path && oldProfile.avatar_path !== avatarPath) {
+      await db.storage.from(BUCKET).remove([oldProfile.avatar_path]);
+    }
+
+    $("profileName").textContent = displayName || "My profile";
+    $("avatarInput").value = "";
+    await loadProfile();
+    showProfileMessage("Profile saved.");
+  } catch (error) {
+    showProfileMessage(`Could not save profile: ${error.message}`, true);
+  }
+}
+
+async function removePhoto() {
+  if (!currentUser) return;
+  if (!confirm("Remove your profile photo?")) return;
+
+  try {
+    const { data, error } = await db.from("profiles")
+      .select("avatar_path")
+      .eq("id", currentUser.id)
+      .maybeSingle();
+    if (error) throw error;
+
+    const path = data?.avatar_path;
+    if (!path) {
+      showProfileMessage("You do not have a profile photo.");
+      return;
+    }
+
+    const { error: updateError } = await db.from("profiles")
+      .update({ avatar_path: null, updated_at: new Date().toISOString() })
+      .eq("id", currentUser.id);
+    if (updateError) throw updateError;
+
+    await db.storage.from(BUCKET).remove([path]);
+
+    $("avatarInput").value = "";
+    await loadProfile();
+    showProfileMessage("Profile photo removed.");
+  } catch (error) {
+    showProfileMessage(`Could not remove photo: ${error.message}`, true);
+  }
+}
+
+async function enterApplication(user) {
+  currentUser = user;
+  setSignedInView(true);
+  await Promise.all([loadDocuments(), loadProfile()]);
+
+  if (openProfileAfterLogin) {
+    openProfileAfterLogin = false;
+    openProfileDialog("Enter a new password below to finish resetting it.");
+  }
+}
+
+async function leaveApplication() {
+  currentUser = null;
+  allFiles = [];
+  loadedUserId = null;
+  setSignedInView(false);
+  $("documentList").replaceChildren();
+}
+
+// Authentication
+$("loginTab").addEventListener("click", () => setAuthMode("login"));
+$("registerTab").addEventListener("click", () => setAuthMode("register"));
+
+$("authForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (busy) return;
+
+  const email = $("email").value.trim();
+  const password = $("password").value;
+
+  if (authMode === "register" && password !== $("confirmPassword").value) {
+    showAuthMessage("Passwords do not match.", true);
+    return;
+  }
+
+  setBusy(true);
+  showAuthMessage("");
+
+  try {
+    if (authMode === "register") {
+      const { data, error } = await db.auth.signUp({ email, password });
+      if (error) throw error;
+
+      if (data.session) {
+        showAuthMessage("Account created successfully.");
+      } else {
+        showAuthMessage("Account created. Check your email if confirmation is enabled, then sign in.");
+      }
+    } else {
+      const { error } = await db.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      showAuthMessage("Signed in successfully.");
+    }
+  } catch (error) {
+    showAuthMessage(error.message || "Authentication failed.", true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$("resetBtn").addEventListener("click", async () => {
+  const email = $("email").value.trim();
+
+  if (!email) {
+    showAuthMessage("Enter your email address first.", true);
+    $("email").focus();
+    return;
+  }
+
+  try {
+    const { error } = await db.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin
+    });
+    if (error) throw error;
+    showAuthMessage("If the email is registered, a password-reset link will be sent.");
+  } catch (error) {
+    showAuthMessage(error.message, true);
+  }
+});
+
+$("logoutBtn").addEventListener("click", async () => {
+  const { error } = await db.auth.signOut();
+  if (error) showMessage(error.message, true);
+});
+
+db.auth.onAuthStateChange((event, session) => {
+  if (event === "PASSWORD_RECOVERY") {
+    if (loadedUserId && loadedUserId === session?.user?.id) {
+      setTimeout(() => openProfileDialog("Enter a new password below to finish resetting it."), 0);
+    } else {
+      openProfileAfterLogin = true;
+    }
+  }
+
+  // Keep auth callbacks quick; avoid Supabase calls inside this callback.
+  if (event === "SIGNED_OUT" || !session?.user) {
+    loadedUserId = null;
+    currentUser = null;
+    setSignedInView(false);
+    return;
+  }
+
+  const user = session.user;
+  if (loadedUserId !== user.id) {
+    loadedUserId = user.id;
+    setTimeout(() => enterApplication(user), 0);
+  }
+});
+
+// Upload controls
+$("fileInput").addEventListener("change", (event) => {
+  uploadFiles(event.target.files);
+});
+
+$("dropFileInput").addEventListener("change", (event) => {
+  uploadFiles(event.target.files);
+});
+
+const dropZone = $("dropZone");
+dropZone.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  dropZone.classList.add("dragging");
+});
+dropZone.addEventListener("dragleave", () => {
+  dropZone.classList.remove("dragging");
+});
+dropZone.addEventListener("drop", (event) => {
+  event.preventDefault();
+  dropZone.classList.remove("dragging");
+  uploadFiles(event.dataTransfer.files);
+});
+
+$("searchInput").addEventListener("input", (event) => {
+  searchTerm = event.target.value.trim().toLowerCase();
+  renderDocuments();
+});
+
+document.querySelectorAll("[data-view]").forEach((button) => {
+  button.addEventListener("click", () => setView(button.dataset.view));
+});
+
+$("refreshBtn").addEventListener("click", loadDocuments);
+$("saveProfileBtn").addEventListener("click", saveProfile);
+$("removePhotoBtn").addEventListener("click", removePhoto);
+
+// Edit profile dialog
+$("editProfileBtn").addEventListener("click", () => openProfileDialog());
+$("closeProfileBtn").addEventListener("click", () => $("profileDialog").close());
+
+$("passwordForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  const setMsg = (text, error = false) => {
+    $("passwordMessage").textContent = text;
+    $("passwordMessage").style.color = error ? "#dc2626" : "#15803d";
+  };
+
+  const newPassword = $("newPassword").value;
+
+  if (newPassword.length < 6) {
+    setMsg("Password must be at least 6 characters.", true);
+    return;
+  }
+  if (newPassword !== $("confirmNewPassword").value) {
+    setMsg("Passwords do not match.", true);
+    return;
+  }
+
+  $("changePasswordBtn").disabled = true;
+  try {
+    const { error } = await db.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+
+    $("passwordForm").reset();
+    $("newPassword").type = "password";
+    document.querySelector('[data-toggle-password="newPassword"]').textContent = "Show";
+    setMsg("Password updated successfully.");
+  } catch (error) {
+    setMsg(error.message || "Could not update password.", true);
+  } finally {
+    $("changePasswordBtn").disabled = false;
+  }
+});
+
+document.querySelectorAll("[data-toggle-password]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const input = $(button.dataset.togglePassword);
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    button.textContent = show ? "Hide" : "Show";
+  });
+});
+
+$("closePreviewBtn").addEventListener("click", () => {
+  $("previewDialog").close();
+  $("previewContent").replaceChildren();
+});
+
+// Dark mode preference
+function applyTheme(isDark) {
+  document.body.classList.toggle("dark", isDark);
+  $("themeBtn").setAttribute("aria-checked", String(isDark));
+  $("themeLabel").textContent = isDark ? "Light mode" : "Dark mode";
+}
+
+try {
+  applyTheme(localStorage.getItem("my-documents-dark") === "yes");
+} catch {}
+
+$("themeBtn").addEventListener("click", () => {
+  const isDark = !document.body.classList.contains("dark");
+  applyTheme(isDark);
+  try {
+    localStorage.setItem("my-documents-dark", isDark ? "yes" : "no");
+  } catch {}
+});
+
+// Restore existing session once.
+const { data: initialSession, error: sessionError } = await db.auth.getSession();
+
+if (sessionError) {
+  showAuthMessage(`Could not check login: ${sessionError.message}`, true);
+} else if (initialSession.session?.user) {
+  loadedUserId = initialSession.session.user.id;
+  await enterApplication(initialSession.session.user);
+} else {
+  setSignedInView(false);
+}

@@ -1,4 +1,3 @@
-
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 
 // Your existing Supabase project
@@ -287,9 +286,10 @@ async function previewFile(file) {
   const ext = file.name.toLowerCase().split(".").pop();
   const isImage = file.category === "images";
   const isPdf = ext === "pdf";
+  const isDocx = ext === "docx";
 
-  if (!isImage && !isPdf) {
-    showMessage("Preview is available for PDF and image files. Use Download for other file types.", true);
+  if (!isImage && !isPdf && !isDocx) {
+    showMessage("Preview is available for PDF, Word (.docx) and image files. Use Download for other file types.", true);
     return;
   }
 
@@ -304,6 +304,31 @@ async function previewFile(file) {
       img.src = url;
       img.alt = file.name;
       content.append(img);
+    } else if (isDocx) {
+      showMessage(`Opening preview of ${file.name}...`);
+      await loadScript(LIBS.mammoth);
+
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Could not read the file from storage.");
+      const { value } = await window.mammoth.convertToHtml({
+        arrayBuffer: await response.arrayBuffer()
+      });
+
+      // Sandboxed frame: the document text can never run scripts on this site.
+      const frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "");
+      frame.title = file.name;
+      frame.srcdoc =
+        `<!doctype html><meta charset="utf-8"><style>
+          html{background:#fff}
+          body{font-family:"Segoe UI",Arial,sans-serif;line-height:1.6;color:#222;
+               max-width:800px;margin:0 auto;padding:24px;text-align:left}
+          img{max-width:100%}
+          table{border-collapse:collapse;margin:12px 0}
+          td,th{border:1px solid #ccc;padding:6px 10px}
+        </style>${value || "<p>This document has no readable content.</p>"}`;
+      content.append(frame);
+      showMessage("");
     } else {
       const frame = document.createElement("iframe");
       frame.src = url;
@@ -391,8 +416,33 @@ const LIBS = {
   mammoth: "https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js",
   pdfjs: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js",
   pdfjsWorker: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js",
-  docx: "https://cdn.jsdelivr.net/npm/docx@7.8.2/build/index.js"
+  docx: "https://cdn.jsdelivr.net/npm/docx@7.8.2/build/index.js",
+  jszip: "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+  docxPreview: "https://cdn.jsdelivr.net/npm/docx-preview@0.3.3/dist/docx-preview.min.js",
+  html2canvas: "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"
 };
+
+// Two of these libraries use the same global name ("docx"), so each one is
+// saved into its own variable right after it loads.
+let docxWriterLib = null;
+let docxPreviewLib = null;
+
+async function getDocxWriter() {
+  if (!docxWriterLib) {
+    await loadScript(LIBS.docx);
+    docxWriterLib = window.docx;
+  }
+  return docxWriterLib;
+}
+
+async function getDocxPreview() {
+  if (!docxPreviewLib) {
+    await loadScript(LIBS.jszip);
+    await loadScript(LIBS.docxPreview);
+    docxPreviewLib = window.docx;
+  }
+  return docxPreviewLib;
+}
 
 const loadedScripts = new Map();
 
@@ -486,130 +536,211 @@ function cleanForPdf(text, stats) {
   });
 }
 
-function wrapText(text, font, size, maxWidth) {
-  const lines = [];
-  let line = "";
+// Word right-aligned tab stops (for example a date at the right edge of a line)
+// are not drawn by the page renderer, so they are re-applied here.
+async function applyRightTabStops(buffer, host) {
+  try {
+    const zip = await window.JSZip.loadAsync(buffer);
+    const entry = zip.file("word/document.xml");
+    if (!entry) return;
 
-  for (const word of text.split(" ")) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
-      line = candidate;
-      continue;
+    const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const xml = new DOMParser().parseFromString(await entry.async("string"), "application/xml");
+    const normalize = (text) => text.replace(/\s+/g, " ").trim();
+    const rightStops = new Map();
+
+    for (const p of xml.getElementsByTagNameNS(W, "p")) {
+      const pPr = [...p.children].find((c) => c.localName === "pPr");
+      const tabs = pPr && [...pPr.children].find((c) => c.localName === "tabs");
+      if (!tabs) continue;
+
+      const right = [...tabs.children].find((t) => {
+        const kind = t.getAttributeNS(W, "val");
+        return t.localName === "tab" && (kind === "right" || kind === "end");
+      });
+      if (!right) continue;
+
+      let text = "";
+      for (const node of p.getElementsByTagName("*")) {
+        if (node.localName === "t") text += node.textContent;
+        if (node.localName === "tab" && node.parentNode.localName === "r") text += " ";
+      }
+      rightStops.set(normalize(text), Number(right.getAttributeNS(W, "pos")));
     }
+    if (!rightStops.size) return;
 
-    if (line) {
-      lines.push(line);
-      line = "";
-    }
+    for (const section of host.querySelectorAll("section.docx")) {
+      const sectionBox = section.getBoundingClientRect();
+      const contentLeft = sectionBox.left + (parseFloat(getComputedStyle(section).paddingLeft) || 0);
 
-    // A single very long word: split it by characters.
-    let chunk = "";
-    for (const ch of word) {
-      if (chunk && font.widthOfTextAtSize(chunk + ch, size) > maxWidth) {
-        lines.push(chunk);
-        chunk = ch;
-      } else {
-        chunk += ch;
+      for (const paragraph of section.querySelectorAll("p")) {
+        const tabsInParagraph = paragraph.querySelectorAll(".docx-tab-stop");
+        if (tabsInParagraph.length !== 1) continue;
+
+        const position = rightStops.get(normalize(paragraph.textContent));
+        if (!position) continue;
+
+        const tab = tabsInParagraph[0];
+        const range = document.createRange();
+        range.setStartAfter(tab);
+        range.setEndAfter(paragraph.lastChild);
+        const trailing = range.getBoundingClientRect().width;
+
+        const targetRight = contentLeft + position / 15;       // twips -> CSS pixels
+        const needed = targetRight - tab.getBoundingClientRect().left - trailing;
+        if (needed > 0) {
+          tab.style.display = "inline-block";
+          tab.style.width = `${needed}px`;
+        }
       }
     }
-    line = chunk;
+  } catch {
+    // Never block a conversion because of tab-stop adjustments.
   }
-
-  if (line) lines.push(line);
-  return lines;
 }
 
 async function wordToPdf(buffer) {
-  await Promise.all([loadScript(LIBS.pdfLib), loadScript(LIBS.mammoth)]);
+  const [preview] = await Promise.all([
+    getDocxPreview(),
+    loadScript(LIBS.html2canvas),
+    loadScript(LIBS.pdfLib)
+  ]);
   const { PDFDocument, StandardFonts } = window.PDFLib;
 
-  const { value: html } = await window.mammoth.convertToHtml({ arrayBuffer: buffer });
-  const parsed = new DOMParser().parseFromString(html, "text/html");
+  // The Word file is drawn by the browser (fonts, alignment, tables, images),
+  // photographed page by page, and an invisible text layer is added on top so
+  // the PDF stays searchable and readable by résumé scanners.
+  const savedScroll = window.scrollY;
+  window.scrollTo(0, 0);
 
-  const stats = { replaced: 0 };
-  const blocks = [];
-  const add = (text, style) => {
-    const cleaned = cleanForPdf(text, stats);
-    if (cleaned) blocks.push({ text: cleaned, style });
-  };
+  const overlay = document.createElement("div");
+  overlay.style.cssText =
+    "position:fixed;inset:0;z-index:99999;background:#fff;color:#444;display:grid;" +
+    "place-items:center;font:600 18px 'Segoe UI',Arial,sans-serif;";
+  overlay.textContent = "Converting to PDF... please wait";
 
-  for (const element of parsed.body.children) {
-    const tag = element.tagName.toLowerCase();
+  const host = document.createElement("div");
+  host.style.cssText = "position:absolute;left:0;top:0;z-index:0;background:#fff;";
+  document.body.append(host, overlay);
 
-    if (/^h[1-6]$/.test(tag)) {
-      add(element.textContent, tag);
-    } else if (tag === "ul" || tag === "ol") {
-      [...element.querySelectorAll("li")].forEach((li, index) => {
-        add(`${tag === "ol" ? `${index + 1}.` : "\u2022"} ${li.textContent}`, "li");
+  try {
+    await preview.renderAsync(buffer, host, host, {
+      inWrapper: false,
+      ignoreWidth: false,
+      ignoreHeight: false,
+      breakPages: true,
+      ignoreLastRenderedPageBreak: false,
+      experimental: true,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      useBase64URL: true
+    });
+
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    await Promise.all(
+      [...host.querySelectorAll("img")].map((img) => (img.decode ? img.decode().catch(() => {}) : null))
+    );
+    await applyRightTabStops(buffer, host);
+
+    const sections = [...host.querySelectorAll("section.docx")];
+    if (!sections.length) throw new Error("This Word file could not be displayed.");
+
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    const stats = { replaced: 0 };
+
+    for (const section of sections) {
+      const box = section.getBoundingClientRect();
+      const pageHeightPx = Math.max(parseFloat(getComputedStyle(section).minHeight) || box.height, 100);
+      const pageCount = box.height > pageHeightPx * 1.02
+        ? Math.ceil(box.height / pageHeightPx - 0.02)
+        : 1;
+
+      const scale = Math.min(1.5, 15000 / Math.max(box.height, 1));
+      const canvas = await window.html2canvas(section, {
+        scale,
+        backgroundColor: "#ffffff",
+        useCORS: true,
+        logging: false
       });
-    } else if (tag === "table") {
-      for (const row of element.querySelectorAll("tr")) {
-        add([...row.children].map((cell) => cell.textContent.trim()).join("  |  "), "p");
+
+      const widthPt = box.width * 0.75;
+      const heightPt = pageHeightPx * 0.75;
+      const pdfPages = [];
+
+      for (let i = 0; i < pageCount; i++) {
+        const slice = document.createElement("canvas");
+        slice.width = canvas.width;
+        slice.height = Math.round(pageHeightPx * scale);
+        const ctx = slice.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, slice.width, slice.height);
+        ctx.drawImage(canvas, 0, -Math.round(i * pageHeightPx * scale));
+
+        const jpeg = await new Promise((resolve) => slice.toBlob(resolve, "image/jpeg", 0.85));
+        const image = await pdf.embedJpg(new Uint8Array(await jpeg.arrayBuffer()));
+        const pdfPage = pdf.addPage([widthPt, heightPt]);
+        pdfPage.drawImage(image, { x: 0, y: 0, width: widthPt, height: heightPt });
+        pdfPages.push(pdfPage);
       }
-    } else {
-      add(element.textContent, "p");
-    }
-  }
 
-  if (!blocks.length) throw new Error("No text was found in this Word file.");
+      // Invisible text layer (Latin letters only) for search, copy and scanners.
+      const walker = document.createTreeWalker(section, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const parentTag = node.parentElement ? node.parentElement.tagName : "";
+        if (parentTag === "STYLE" || parentTag === "SCRIPT" || !node.nodeValue.trim()) continue;
 
-  const styles = {
-    h1: { size: 20, bold: true },
-    h2: { size: 16, bold: true },
-    h3: { size: 14, bold: true },
-    h4: { size: 12, bold: true },
-    h5: { size: 12, bold: true },
-    h6: { size: 12, bold: true },
-    p: { size: 11 },
-    li: { size: 11, indent: 14 }
-  };
+        const pattern = /\S+/g;
+        let match;
+        while ((match = pattern.exec(node.nodeValue))) {
+          const range = document.createRange();
+          range.setStart(node, match.index);
+          range.setEnd(node, match.index + match[0].length);
+          const rect = range.getClientRects()[0];
+          if (!rect || rect.width <= 0 || rect.height <= 0) continue;
 
-  const pdf = await PDFDocument.create();
-  const regular = await pdf.embedFont(StandardFonts.Helvetica);
-  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+          const safe = cleanForPdf(match[0], stats).replace(/\?/g, "");
+          if (!safe) continue;
 
-  const pageWidth = 595.28;
-  const pageHeight = 841.89;
-  const margin = 54;
-  let page = pdf.addPage([pageWidth, pageHeight]);
-  let y = pageHeight - margin;
+          const pageIndex = Math.min(pageCount - 1, Math.max(0, Math.floor((rect.top - box.top) / pageHeightPx)));
+          const size = Math.max(4, (rect.height * 0.75) / 1.2);
+          const bottomInPage = rect.bottom - box.top - pageIndex * pageHeightPx;
 
-  for (const block of blocks) {
-    const style = styles[block.style] || styles.p;
-    const font = style.bold ? bold : regular;
-    const indent = style.indent || 0;
-    const lineHeight = style.size * 1.4;
-    const lines = wrapText(block.text, font, style.size, pageWidth - margin * 2 - indent);
-
-    if (style.bold) y -= 6;
-
-    for (const line of lines) {
-      if (y - lineHeight < margin) {
-        page = pdf.addPage([pageWidth, pageHeight]);
-        y = pageHeight - margin;
+          pdfPages[pageIndex].drawText(safe, {
+            x: (rect.left - box.left) * 0.75,
+            y: heightPt - bottomInPage * 0.75 + size * 0.2,
+            size,
+            font,
+            opacity: 0
+          });
+        }
       }
-      y -= lineHeight;
-      page.drawText(line, { x: margin + indent, y, size: style.size, font });
     }
-    y -= 6;
-  }
 
-  return {
-    blob: new Blob([await pdf.save()], { type: "application/pdf" }),
-    note: stats.replaced
-      ? "Some characters (for example non-English scripts) could not be converted."
-      : ""
-  };
+    return {
+      blob: new Blob([await pdf.save()], { type: "application/pdf" }),
+      note: stats.replaced
+        ? "The pages look identical to the Word file; text in other languages is not searchable."
+        : ""
+    };
+  } finally {
+    host.remove();
+    overlay.remove();
+    window.scrollTo(0, savedScroll);
+  }
 }
 
 async function pdfToWord(buffer) {
-  await Promise.all([loadScript(LIBS.pdfjs), loadScript(LIBS.docx)]);
+  const docxWriter = await getDocxWriter();
+  await loadScript(LIBS.pdfjs);
 
   const pdfjsLib = window.pdfjsLib;
   pdfjsLib.GlobalWorkerOptions.workerSrc = LIBS.pdfjsWorker;
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
 
-  const { Document, Packer, Paragraph, TextRun } = window.docx;
+  const { Document, Packer, Paragraph, TextRun } = docxWriter;
   const paragraphs = [];
   let totalChars = 0;
 
@@ -662,8 +793,11 @@ async function pdfToWord(buffer) {
 }
 // ===== End file conversion =====
 
+let converting = false;
+
 async function convertFile(file, kind) {
-  if (busy) return;
+  if (busy || converting) return;
+  converting = true;
 
   showMessage(`Converting ${file.name}... please wait.`);
 
@@ -693,9 +827,11 @@ async function convertFile(file, kind) {
     }
 
     await uploadFiles([new File([result.blob], newName, { type: mime })]);
-    showMessage(`Converted and saved as ${newName}. ${result.note}`.trim(), Boolean(result.note));
+    showMessage(`Converted and saved as ${newName}. ${result.note}`.trim());
   } catch (error) {
     showMessage(`Conversion failed: ${error.message}`, true);
+  } finally {
+    converting = false;
   }
 }
 

@@ -71,7 +71,10 @@
         <button data-view="trash">Trash <span id="count-trash">0</span></button>
       </nav>
 
-      <button id="themeBtn" type="button">🌙 Dark mode</button>
+      <button id="themeBtn" class="theme-switch" type="button" role="switch" aria-checked="false">
+        <span id="themeLabel">Dark mode</span>
+        <span class="theme-track"><span class="theme-knob"></span></span>
+      </button>
       <button id="logoutBtn" type="button">Sign out</button>
     </aside>
 
@@ -144,6 +147,7 @@
 
     <label for="avatarInput">Profile photo</label>
     <input id="avatarInput" type="file" accept="image/*">
+    <button id="removePhotoBtn" type="button" hidden>🗑️ Remove photo</button>
 
     <button id="saveProfileBtn" type="button">Save profile</button>
     <p id="profileMessage" role="status"></p>

@@ -478,3 +478,74 @@ body.dark #searchInput { background: #19182e; }
 #profileDialog h3 { margin: 4px 0 0; }
 #profileDialog p { overflow-wrap: anywhere; margin: 10px 0 0; min-height: 1.2em; }
 .dialog-divider { margin: 22px 0 16px; border: 0; border-top: 1px solid var(--border); }
+
+/* Remove photo button */
+#profileDialog #removePhotoBtn {
+  width: 100%;
+  margin-top: 10px;
+  color: #be345b;
+  background: #fff0f4;
+  border-color: #f5c2d0;
+}
+#profileDialog #removePhotoBtn:hover { background: #ffe1ea; }
+body.dark #profileDialog #removePhotoBtn {
+  color: #ff9db9;
+  background: #3a2433;
+  border-color: #5b3347;
+}
+
+/* Sun / moon dark-mode switch */
+#themeBtn.theme-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px 8px 16px;
+  border-radius: 999px;
+  color: #ffffff;
+  font-weight: 600;
+  background: #ffffff14;
+  border: 1px solid #ffffff30;
+}
+.theme-track {
+  position: relative;
+  flex: none;
+  width: 62px;
+  height: 30px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #7dd3fc, #fde68a);
+  box-shadow: inset 0 2px 5px #0000003a;
+  transition: background .4s;
+}
+.theme-track::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity .4s;
+  background:
+    radial-gradient(circle at 18% 30%, #ffffff 1px, transparent 2px),
+    radial-gradient(circle at 42% 72%, #ffffff 1px, transparent 2px),
+    radial-gradient(circle at 30% 52%, #ffffffcc 1.2px, transparent 2.2px),
+    radial-gradient(circle at 55% 25%, #ffffffaa 1px, transparent 2px);
+}
+.theme-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #ffffff;
+  font-size: 14px;
+  box-shadow: 0 2px 6px #00000050;
+  transition: transform .45s cubic-bezier(.68, -.4, .27, 1.4);
+}
+.theme-knob::after { content: "☀️"; }
+body.dark .theme-track { background: linear-gradient(135deg, #1e1b4b, #4338ca); }
+body.dark .theme-track::before { opacity: 1; }
+body.dark .theme-knob { transform: translateX(32px); background: #e0e7ff; }
+body.dark .theme-knob::after { content: "🌙"; }
